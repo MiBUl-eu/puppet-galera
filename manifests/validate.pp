@@ -52,7 +52,7 @@ class galera::validate (
     command     => $cmd,
     tries       => $retries,
     try_sleep   => $delay,
-    subscribe   => Service[$galera::mysql_service_name],
+    subscribe   => Service['mysqld'],
     refreshonly => true,
   }
 

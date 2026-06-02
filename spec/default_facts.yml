@@ -5,4 +5,9 @@
 is_pe: false
 root_home: "/root"
 fqdn: localhost
+galera_wsrep_state:
+  grastate_present: false
+  safe_to_bootstrap: false
+  bootstrap_seqno: 0
+  grastate_path: /var/lib/mysql/grastate.dat
 

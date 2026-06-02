@@ -7,7 +7,7 @@ garb_enable="YES"
 garb_enable="NO"
 <%   } -%>
 <%#  # The FreeBSD port of garb expects a space-separated list. -%>
-<%   $_temp = $galera::galera_servers.map |$node| { "${node}" } -%>
+<%   $_temp = $galera::galera_servers_effective.map |$node| { "${node}" } -%>
 <%   $_nodes = join($_temp, ' ') -%>
 garb_galera_nodes="<%= $_nodes %>"
 garb_galera_group="<%= $galera::cluster_name %>"
@@ -18,7 +18,7 @@ garb_log_file="<%= $galera::arbitrator_logfile %>"
 <% } else { -%>
 <%#  # Linux -%>
 <%#  # The Linux service of garb expects a comma-separated list. -%>
-<%   $_temp = $galera::galera_servers.map |$node| { "${node}:${galera::wsrep_group_comm_port}" } -%>
+<%   $_temp = $galera::galera_servers_effective.map |$node| { "${node}:${galera::wsrep_group_comm_port}" } -%>
 <%   $_nodes =  join($_temp, ',') -%>
 GALERA_NODES="<%= $_nodes %>"
 GALERA_GROUP="<%= $galera::cluster_name %>"

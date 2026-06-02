@@ -96,8 +96,29 @@
 #   Default: `true`
 #
 # @param galera_master
-#   Specifies the node that will bootstrap the cluster if all nodes go down.
-#   Default: `$fqdn`
+#   Specifies the node that bootstraps the cluster on first install when
+#   `$bootstrap_mode` is `initial`. Also used as a tie-breaker when
+#   `$bootstrap_mode` is `newest`. Default: `$fqdn`
+#
+# @param bootstrap_mode
+#   Controls automatic cluster bootstrap. Valid options:
+#   `disabled` — never bootstrap automatically;
+#   `initial` — bootstrap only on `$galera_master` during first install
+#   (no existing `grastate.dat`, or `safe_to_bootstrap: 1`);
+#   `newest` — bootstrap the node with the highest `bootstrap_seqno` among
+#   cluster members with fresh PuppetDB facts (requires
+#   `$discover_cluster_members`). Default: `initial`
+#
+# @param bootstrap_fact_max_age
+#   Maximum age in seconds for a peer's `galera_wsrep_state` fact in PuppetDB
+#   when `$bootstrap_mode` is `newest` and `$bootstrap_require_fresh_facts`
+#   is enabled. Default: `300`
+#
+# @param bootstrap_require_fresh_facts
+#   When enabled with `$bootstrap_mode` set to `newest`, every cluster member
+#   must have reported `galera_wsrep_state` within `$bootstrap_fact_max_age`
+#   before any node may bootstrap. Prevents decisions based on stale seqnos.
+#   Default: `true`
 #
 # @param galera_package_ensure
 #   Specifies the ensure state for the galera package. Note that some vendors
@@ -111,7 +132,38 @@
 #
 # @param galera_servers
 #   Specifies a list of IP addresses of the nodes in the galera cluster.
-#   Default: `[${facts['networking']['ip']}]`
+#   When `$discover_cluster_members` is enabled, this list is merged with
+#   PuppetDB results and used as a fallback when PuppetDB returns no nodes.
+#
+# @param discover_cluster_members
+#   When enabled, cluster members are discovered via PuppetDB in addition to
+#   any statically configured `$galera_servers`. Requires the built-in
+#   `puppetdb_query` function (PuppetDB terminus on the compiler). Default: `false`
+#
+# @param puppetdb_query_string
+#   Optional PuppetDB Query Language (PQL) query used to discover cluster
+#   members. When unset, a default query selects nodes with the `Galera` class
+#   and a matching `$cluster_name`. The query must return IP addresses.
+#
+# @param puppetdb_ip_fact
+#   Fact name used in the default PuppetDB query to obtain node IP addresses.
+#   Default: `networking.ip`
+#
+# @param minimum_cluster_size
+#   Minimum number of nodes (including this node) that must register in
+#   PuppetDB before the master node is allowed to bootstrap the cluster.
+#   Default: `3`
+#
+# @param puppetdb_require_minimum_size
+#   When enabled together with `$discover_cluster_members`, the master node
+#   will not bootstrap until `$minimum_cluster_size` nodes have registered.
+#   This prevents premature cluster bootstrap while nodes are still joining.
+#   Default: `true`
+#
+# @param puppetdb_empty_query_safeguard
+#   When enabled, an empty PuppetDB response will not shrink the cluster
+#   membership. Configured servers and the existing `wsrep_cluster_address`
+#   on the node are preserved instead. Default: `true`
 #
 # @param libgalera_location
 #   Specifies the location of the WSREP libraries.
@@ -301,6 +353,9 @@ class galera (
   Hash $default_options,
   Boolean $epel_needed,
   String $galera_master,
+  Enum['disabled', 'initial', 'newest'] $bootstrap_mode,
+  Integer $bootstrap_fact_max_age,
+  Boolean $bootstrap_require_fresh_facts,
   String $local_ip,
   Boolean $manage_additional_packages,
   Integer $mysql_port,
@@ -346,6 +401,12 @@ class galera (
   Optional[String] $galera_package_ensure = undef,
   Optional[String] $galera_package_name = undef,
   Optional[Array] $galera_servers = undef,
+  Boolean $discover_cluster_members = false,
+  Optional[String] $puppetdb_query_string = undef,
+  String $puppetdb_ip_fact = 'networking.ip',
+  Integer $minimum_cluster_size = 3,
+  Boolean $puppetdb_require_minimum_size = true,
+  Boolean $puppetdb_empty_query_safeguard = true,
   Optional[String] $libgalera_location = undef,
   Optional[String] $mysql_package_name = undef,
   Optional[String] $mysql_service_name = undef,
@@ -419,6 +480,7 @@ class galera (
     }
     $memo + { $x[0] => $_v }
   }
+  $mysql_service_name_effective = $params['mysql_service_name']
 
   # Lookup *optional* parameters that may vary depending on the values of
   # $vendor_version and $vendor_type. These parameters will later be passed
@@ -434,9 +496,68 @@ class galera (
     $memo + { $x[0] => $_v }
   }
 
+  $existing_cluster_members = if $facts['galera_cluster_members'] {
+    $facts['galera_cluster_members']
+  } else {
+    []
+  }
+
+  $_cluster_members = galera::resolve_cluster_members(
+    $discover_cluster_members,
+    $galera_servers,
+    $local_ip,
+    $cluster_name,
+    $puppetdb_query_string,
+    $puppetdb_ip_fact,
+    $minimum_cluster_size,
+    $puppetdb_require_minimum_size,
+    $puppetdb_empty_query_safeguard,
+    $existing_cluster_members,
+  )
+  $galera_servers_effective = $_cluster_members['members']
+  $cluster_ready = $_cluster_members['cluster_ready']
+
+  $wsrep_state = if $facts['galera_wsrep_state'] {
+    $facts['galera_wsrep_state']
+  } else {
+    {
+      'grastate_present' => false,
+      'safe_to_bootstrap' => false,
+      'bootstrap_seqno' => -1,
+      'grastate_path' => '/var/lib/mysql/grastate.dat',
+    }
+  }
+
+  $bootstrap_permitted = galera::bootstrap_permitted(
+    $bootstrap_mode,
+    $facts['networking']['fqdn'],
+    $galera_master,
+    $cluster_name,
+    $discover_cluster_members,
+    $wsrep_state,
+    $bootstrap_fact_max_age,
+    $bootstrap_require_fresh_facts,
+  )
+
+  # Galera cannot start without bootstrap (master) or a running peer to join.
+  $_peer_ips = $galera_servers_effective.filter |$ip| { $ip != $local_ip }
+  $_peer_list = join($_peer_ips, ' ')
+
+  $await_puppetdb_peers = (
+    $discover_cluster_members and
+    $puppetdb_require_minimum_size and
+    !$cluster_ready and
+    !$wsrep_state['grastate_present']
+  )
+
+  $bootstrap_waiting = ($bootstrap_permitted and $await_puppetdb_peers)
+  $join_waiting = (!$bootstrap_permitted and $_peer_list == '')
+  $mysql_start_deferred = $bootstrap_waiting or $join_waiting
+  $bootstrap_allowed = $bootstrap_permitted and ($cluster_ready or !$await_puppetdb_peers)
+
   # Add the wsrep_cluster_address option to the server configuration.
   # It requires some preprocessing...
-  $_nodes_tmp = $galera_servers.map |$node| { "${node}:${wsrep_group_comm_port}" }
+  $_nodes_tmp = $galera_servers_effective.map |$node| { "${node}:${wsrep_group_comm_port}" }
   $node_list = join($_nodes_tmp, ',')
   $_wsrep_cluster_address = {
     'mysqld' => {
@@ -510,6 +631,15 @@ class galera (
     $create_root_user_real = $create_root_user
   }
 
+  # Skip MySQL account management while startup is intentionally deferred.
+  if $mysql_start_deferred {
+    $create_root_user_effective = false
+    $create_status_user_effective = false
+  } else {
+    $create_root_user_effective = $create_root_user_real
+    $create_status_user_effective = $create_status_user
+  }
+
   if $configure_repo {
     # Ensure that repos are setup before trying to install packages.
     $_packages_require = [Class['galera::repo']]
@@ -542,7 +672,7 @@ class galera (
   if $arbitrator {
     $_packages_before = [Class['galera::arbitrator']]
   } else {
-    if ($facts['networking']['fqdn'] == $galera_master) {
+    if ($bootstrap_permitted) {
       $_packages_before = [
         Class['mysql::server::install'],
         Exec['bootstrap_galera_cluster']
@@ -589,14 +719,14 @@ class galera (
       ]
     }
 
-    if $validate_connection {
+    if $validate_connection and !$mysql_start_deferred {
       include galera::validate
       # Ensure that MySQL server setup is complete, otherwise the service
       # might not be running and validation would fail.
       Class['mysql::server'] -> Class['galera::validate']
     }
 
-    if ($create_root_my_cnf == true) {
+    if ($create_root_my_cnf == true and !$mysql_start_deferred) {
       # Check if we can already login with the given password
       $my_cnf = "[client]\r\nuser=root\r\nhost=localhost\r\npassword='${root_password}'\r\n"
 
@@ -607,24 +737,56 @@ class galera (
           "mysql --user=root --password=${root_password} -e 'select count(1);'",
           "test `cat ${facts['root_home']}/.my.cnf | grep -c \"password='${root_password}'\"` -eq 0",
         ],
-        require => Service[$params['mysql_service_name']],
+        require => Service['mysqld'],
         before  => $_root_my_cnf_before,
+      }
+    }
+
+    # --- MySQL service startup (Galera-specific) ---
+    $mysql_service_enabled_real = $mysql_start_deferred ? {
+      true    => false,
+      default => $service_enabled,
+    }
+
+    if $bootstrap_waiting {
+      notify { 'galera_bootstrap_waiting':
+        message => "Galera: waiting for ${minimum_cluster_size} nodes in PuppetDB before bootstrap. Run puppet agent on all cluster nodes, then retry on ${galera_master}.",
+      }
+    }
+
+    if $join_waiting {
+      notify { 'galera_join_waiting':
+        message => 'Galera: no peer addresses known yet; configure galera_servers or wait for PuppetDB discovery, then retry after the bootstrap node is up.',
       }
     }
 
     # Setup MySQL server with custom parameters.
     class { 'mysql::server':
       create_root_my_cnf => $create_root_my_cnf,
-      create_root_user   => $create_root_user_real,
+      create_root_user   => $create_root_user_effective,
       override_options   => $options,
       package_ensure     => $package_ensure,
       package_name       => $params['mysql_package_name'],
       purge_conf_dir     => $purge_conf_dir,
       restart            => $mysql_restart,
       root_password      => $root_password,
-      service_enabled    => $service_enabled,
-      service_name       => $params['mysql_service_name'],
+      service_enabled    => $mysql_service_enabled_real,
+      service_name       => $mysql_service_name_effective,
       *                  => $optional_params,
+    }
+
+    # Join nodes: block service start until a peer listens on the wsrep port.
+    if (!$bootstrap_permitted and !$join_waiting and $_peer_list != '') {
+      exec { 'galera_require_cluster_peer':
+        command => '/bin/false',
+        unless  => "nmap -Pn -p ${wsrep_group_comm_port} ${_peer_list} 2>/dev/null | grep -q '${wsrep_group_comm_port}/tcp open'",
+        before  => Class['mysql::server::service'],
+        path    => ['/usr/bin', '/bin', '/usr/sbin', '/sbin'],
+      }
+
+      notify { 'galera_join_peer_gate':
+        message => "Galera: this node joins the cluster; bootstrap ${galera_master} first, then re-run puppet here.",
+      }
     }
 
     file { $rundir:
@@ -646,16 +808,25 @@ class galera (
       before => $_packages_before,
     }
 
-    if ($facts['networking']['fqdn'] == $galera_master) {
-      # If there are no other servers up and we are the master, the cluster
-      # needs to be bootstrapped. This happens before the service is managed
-      $server_list = join($galera_servers, ' ')
+    if ($bootstrap_allowed) {
+      # Bootstrap only when permitted by bootstrap_mode and no peer is already up.
+      $server_list = join($galera_servers_effective, ' ')
+
+      if ($bootstrap_mode == 'newest' and !$wsrep_state['safe_to_bootstrap'] and $wsrep_state['grastate_present']) {
+        exec { 'prepare_galera_bootstrap':
+          command => "sed -i 's/^safe_to_bootstrap: 0/safe_to_bootstrap: 1/' ${wsrep_state['grastate_path']}",
+          onlyif  => "grep -q '^safe_to_bootstrap: 0' ${wsrep_state['grastate_path']}",
+          require => Class['mysql::server::installdb'],
+          before  => Exec['bootstrap_galera_cluster'],
+          path    => ['/usr/bin', '/bin', '/usr/local/bin'],
+        }
+      }
 
       exec { 'bootstrap_galera_cluster':
         command  => $params['bootstrap_command'],
         unless   => "nmap -Pn -p ${wsrep_group_comm_port} ${server_list} | grep -q '${wsrep_group_comm_port}/tcp open'",
         require  => Class['mysql::server::installdb'],
-        before   => Service[$params['mysql_service_name']],
+        before   => Service['mysqld'],
         provider => shell,
         path     => '/usr/bin:/bin:/usr/local/bin:/usr/sbin:/sbin:/usr/local/sbin',
       }

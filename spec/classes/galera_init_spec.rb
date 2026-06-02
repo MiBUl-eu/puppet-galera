@@ -8,6 +8,7 @@ describe 'galera' do
       arbitrator_package_name: 'galera-arbitrator',
       arbitrator_service_name: 'garb',
       bind_address: '10.2.2.1',
+      bootstrap_mode: 'initial',
       cluster_name: 'testcluster',
       configure_firewall: true,
       configure_repo: true,
@@ -71,6 +72,27 @@ describe 'galera' do
     context 'when node is the master' do
       before(:each) { params.deep_merge!(galera_master: facts[:networking]['fqdn']) }
       it { is_expected.to contain_exec('bootstrap_galera_cluster') }
+    end
+
+    context 'when bootstrap_mode is disabled' do
+      before(:each) { params.deep_merge!(galera_master: facts[:networking]['fqdn'], bootstrap_mode: 'disabled') }
+      it { is_expected.not_to contain_exec('bootstrap_galera_cluster') }
+    end
+
+    context 'when the cluster already existed' do
+      let(:facts) do
+        super().merge(
+          galera_wsrep_state: {
+            'grastate_present' => true,
+            'safe_to_bootstrap' => false,
+            'bootstrap_seqno' => 42,
+            'grastate_path' => '/var/lib/mysql/grastate.dat',
+          },
+        )
+      end
+
+      before(:each) { params.deep_merge!(galera_master: facts[:networking]['fqdn']) }
+      it { is_expected.not_to contain_exec('bootstrap_galera_cluster') }
     end
 
     context 'when node is not the master' do
@@ -282,7 +304,14 @@ describe 'galera' do
   on_supported_os.each do |os, facts|
     context "on #{os}" do # rubocop:disable RSpec/EmptyExampleGroup
       let(:facts) do
-        facts
+        facts.merge(
+          galera_wsrep_state: {
+            'grastate_present' => false,
+            'safe_to_bootstrap' => false,
+            'bootstrap_seqno' => 0,
+            'grastate_path' => '/var/lib/mysql/grastate.dat',
+          },
+        )
       end
 
       let(:os_params) do

@@ -6,3 +6,6 @@ galera::galera_servers:
   - '10.0.99.102'
 
 galera::galera_master: localhost
+galera::bootstrap_mode: initial
+galera::bootstrap_fact_max_age: 300
+galera::bootstrap_require_fresh_facts: true

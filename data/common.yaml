@@ -26,6 +26,9 @@ galera::default_options:
     wsrep_sst_receive_address: "<%= $local_ip %>"
 galera::epel_needed: false
 galera::galera_master: "%{fqdn}"
+galera::bootstrap_mode: 'initial'
+galera::bootstrap_fact_max_age: 300
+galera::bootstrap_require_fresh_facts: true
 galera::local_ip: "%{networking.ip}"
 galera::manage_additional_packages: true
 galera::mysql_port: 3306
@@ -83,6 +86,11 @@ galera::wsrep_inc_state_transfer_port: 4568
 galera::wsrep_sst_auth: "root:<%= $root_password %>"
 galera::wsrep_sst_method: 'rsync'
 galera::wsrep_state_transfer_port: 4444
+galera::discover_cluster_members: false
+galera::puppetdb_ip_fact: 'networking.ip'
+galera::minimum_cluster_size: 3
+galera::puppetdb_require_minimum_size: true
+galera::puppetdb_empty_query_safeguard: true
 
 # nmap is required for proper operation of this module.
 # NOTE: Remember to also add 'nmap' when overwriting the package list for a

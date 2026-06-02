@@ -2,7 +2,7 @@
 # @api private
 class galera::status (
 ) {
-  if $galera::create_status_user {
+  if $galera::create_status_user_effective {
     if $galera::status_allow != 'localhost' {
       # Create status user for the specified host
       mysql_user { "${galera::status_user}@${galera::status_allow}":

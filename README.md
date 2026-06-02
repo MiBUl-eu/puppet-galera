@@ -28,7 +28,7 @@ NOTE: The "main" branch on GitHub contains the development version, which may br
 
 This module will massage puppetlabs-mysql into creating a Galera cluster on MySQL, MariaDB or XtraDB. It also supports setting up an Arbitrator node.
 
-It will try to recover from failures by bootstrapping on a node designated as the master if no other nodes appear to be running mysql, but if the cluster goes down and the master is permanently taken out, another node will need to be specified as the 'master' that can bootstrap the cluster.
+Automatic cluster bootstrap is controlled by `$bootstrap_mode` (default: `initial`). By default, bootstrap runs **only once** on `$galera_master` during first install. After a cluster has existed, Puppet will **not** bootstrap automatically during a full outage — recovery must be done manually or with `$bootstrap_mode => 'newest'`.
 
 ## Requirements
 
@@ -39,6 +39,7 @@ It will try to recover from failures by bootstrapping on a node designated as th
 * [puppetlabs/xinetd](https://github.com/puppetlabs/puppetlabs-xinetd) if `galera::status_type` is set to `xinetd` (default for FreeBSD)
 * [puppet/systemd](https://github.com/voxpupuli/puppet-systemd) if `galera::status_type` is set to `systemd` (default for newer Linux distributions)
 * [puppetlabs/firewall](https://github.com/puppetlabs/puppetlabs-firewall) unless `galera::configure_firewall` is disabled
+* A working **PuppetDB** connection on the compiler (built-in `puppetdb_query` function) when `galera::discover_cluster_members` is enabled — there is **no** separate Forge module
 
 ## Usage
 
@@ -140,6 +141,135 @@ class { 'galera':
   ...
 }
 ```
+
+### Discovering cluster members with PuppetDB
+
+Instead of maintaining a static list of IP addresses, cluster members can be
+discovered automatically from PuppetDB. This uses the built-in `puppetdb_query`
+function from the [PuppetDB terminus](https://www.puppet.com/docs/puppetdb/) —
+**not** a separate Forge module (there is no `puppetlabs/puppetdb_query` package).
+
+The Puppet compiler must have PuppetDB configured, for example in
+`/etc/puppetlabs/puppet/puppetdb.conf` on the server.
+
+Test on a compiler:
+
+```bash
+puppet apply -e "notice(puppetdb_query('resources[certname] { type = \"Class\" and title = \"Galera\" }'))"
+```
+
+If that fails, use a static member list instead (recommended for getting started):
+
+```puppet
+class { 'galera':
+  vendor_type    => 'mariadb',
+  vendor_version => '10.11',
+  cluster_name   => 'mycluster',
+  galera_servers => ['10.0.99.101', '10.0.99.102', '10.0.99.103'],
+  galera_master  => 'node1.example.com',
+  mysql_service_name => 'mariadb',
+  ...
+}
+```
+
+With PuppetDB discovery enabled:
+
+```puppet
+class { 'galera':
+  vendor_type              => 'mariadb',
+  vendor_version           => '10.11',
+  cluster_name             => 'mycluster',
+  discover_cluster_members => true,
+  galera_master            => 'node1.example.com',
+  root_password            => 'pa$$w0rd',
+  status_password          => 'pa$$w0rd',
+}
+```
+
+All nodes must declare the `galera` class with the same `$cluster_name`. The
+default PuppetDB query selects nodes where the `Galera` class is present and
+`cluster_name` matches.
+
+You can still provide `$galera_servers` as a fallback when PuppetDB is
+unavailable. With `$puppetdb_empty_query_safeguard` enabled (default), an empty
+PuppetDB response will **not** shrink an existing cluster: configured servers,
+the local IP, and the `wsrep_cluster_address` already present in MySQL
+configuration are preserved.
+
+`$minimum_cluster_size` together with `$puppetdb_require_minimum_size` (both
+enabled by default) act as a safeswitch for **cluster bootstrap**: the master
+node will not run the bootstrap command until enough nodes have registered in
+PuppetDB. Cluster membership (`wsrep_cluster_address`) still includes all
+nodes discovered so far, so configuration stays consistent across nodes.
+
+Until `cluster_ready` is true on the bootstrap node, MySQL startup is deferred
+there. Join nodes are blocked by an exec gate until port 4567 is open on a
+peer — re-run Puppet after `$galera_master` has bootstrapped.
+
+### Greenfield rollout order
+
+1. Run `puppet agent -t` on **all** cluster nodes (registers them in PuppetDB).
+2. Run `puppet agent -t` on `$galera_master` — bootstraps and starts MySQL.
+3. Run `puppet agent -t` on the other nodes — they join once the master listens on 4567.
+
+If step 3 fails with `galera_require_cluster_peer`, the bootstrap node is not up yet — complete step 2 first.
+
+Debug with:
+
+```bash
+facter -j galera_wsrep_state
+tail -50 /var/log/mysql/error.log
+nmap -Pn -p 4567 <galera_master_ip>
+grep wsrep /etc/mysql/my.cnf /etc/mysql/conf.d/*.cnf 2>/dev/null
+```
+
+A custom query can be supplied via `$puppetdb_query_string` if you use tags,
+roles, or other criteria to identify cluster members.
+
+### Cluster bootstrap
+
+Bootstrap is controlled by `$bootstrap_mode`:
+
+| Mode | Behaviour |
+|------|-----------|
+| `initial` (default) | Bootstrap only on `$galera_master` during **first install** (no `grastate.dat` yet, or `safe_to_bootstrap: 1`). After the cluster has existed once, automatic bootstrap is disabled. |
+| `newest` | Bootstrap the node with the highest **fresh** `bootstrap_seqno` (local fact is always current; peer seqnos must be newer than `$bootstrap_fact_max_age` in PuppetDB). Requires `$discover_cluster_members => true`. |
+| `disabled` | Never bootstrap automatically. Equivalent to `bootstrap_command => '/bin/false'`. |
+
+Example for a production role that never auto-bootstraps after install:
+
+```puppet
+class { 'galera':
+  bootstrap_mode => 'disabled',
+  ...
+}
+```
+
+Example for automated recovery using the node with the newest data:
+
+```puppet
+class { 'galera':
+  discover_cluster_members => true,
+  bootstrap_mode           => 'newest',
+  bootstrap_fact_max_age   => 300,
+  ...
+}
+```
+
+**Important:** `$bootstrap_mode => 'newest'` compares seqnos from PuppetDB for peer nodes. A report that is 30 minutes old can show an outdated seqno and lead to the wrong node winning (or no bootstrap at all). With `$bootstrap_require_fresh_facts` enabled (default), **every** cluster member must have reported `galera_wsrep_state` within `$bootstrap_fact_max_age` seconds (default: 300) before any node bootstraps.
+
+After a complete outage, refresh facts on all nodes first:
+
+```bash
+# On each cluster node, with MySQL stopped:
+puppet agent -t
+```
+
+Then run Puppet again so the bootstrap decision uses current seqnos. The local node always uses its live `galera_wsrep_state` fact (including `mysqld --wsrep-recover`); only peer nodes rely on PuppetDB timestamps.
+
+For production clusters, `$bootstrap_mode => 'initial'` (default) or `disabled` remains the safer choice.
+
+After a **complete outage** with `$bootstrap_mode => 'initial'` (default), no node will bootstrap automatically. Follow your vendor's Galera recovery procedure manually (find the node with the highest seqno, bootstrap that node, then start the others).
 
 ### Configuring an Arbitrator
 
@@ -251,9 +381,9 @@ Classes and parameters are documented in [REFERENCE.md](REFERENCE.md).
 
 This module was created to work in tandem with the puppetlabs-mysql module, rather than replacing it. As the stages in the mysql module are quite strictly laid out in the `mysql::server` class, this module places its own resources in the gaps between them.
 
-Of note is an `exec` that will start the mysql service with parameters which will bootstrap/start a new cluster, but only if it cannot open the comms port to any other node in the provided list. This is verified with a simple `nmap` command and should not be considered terribly reliable.
+Bootstrap only runs when no peer already listens on the Galera port (`nmap` check) and `$bootstrap_permitted` is true for the selected `$bootstrap_mode`. The `nmap` check should not be considered terribly reliable.
 
-Furthermore the bootstrap functionality may be considered harmful for existing clusters. For extra safety, the bootstrap command may be set to something like `/bin/false` (see [GH-116](https://github.com/markt-de/puppet-galera/issues/116) for more information).
+With `$bootstrap_mode => 'newest'`, seqno comparison uses the local `galera_wsrep_state` fact on each node and PuppetDB for peers. Stale PuppetDB facts (older than `$bootstrap_fact_max_age`) block automatic bootstrap when `$bootstrap_require_fresh_facts` is enabled (default).
 
 It should also be noted that it is not possible to unset default configuration variables (see [GH-174](https://github.com/markt-de/puppet-galera/issues/174)). This is true for this modules' own variables, but also for pre-defined variables that are set by the puppetlabs/mysql module.
 

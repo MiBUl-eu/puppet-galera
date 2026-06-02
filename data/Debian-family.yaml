@@ -70,6 +70,7 @@ galera::mariadb::105::arbitrator_service_name: 'garb'
 galera::mariadb::105::client_package_name: 'mariadb-client-10.5'
 galera::mariadb::105::galera_package_name: 'galera-4'
 galera::mariadb::105::mysql_package_name: 'mariadb-server-10.5'
+galera::mariadb::105::mysql_service_name: 'mariadb'
 
 galera::mariadb::106::arbitrator_config_file: '/etc/default/garb'
 galera::mariadb::106::arbitrator_package_name: 'galera-arbitrator-4'
@@ -77,6 +78,7 @@ galera::mariadb::106::arbitrator_service_name: 'garb'
 galera::mariadb::106::client_package_name: 'mariadb-client-10.6'
 galera::mariadb::106::galera_package_name: 'galera-4'
 galera::mariadb::106::mysql_package_name: 'mariadb-server-10.6'
+galera::mariadb::106::mysql_service_name: 'mariadb'
 
 galera::mariadb::1011::arbitrator_config_file: '/etc/default/garb'
 galera::mariadb::1011::arbitrator_package_name: 'galera-arbitrator-4'
@@ -84,6 +86,7 @@ galera::mariadb::1011::arbitrator_service_name: 'garb'
 galera::mariadb::1011::client_package_name: 'mariadb-client'
 galera::mariadb::1011::galera_package_name: 'galera-4'
 galera::mariadb::1011::mysql_package_name: 'mariadb-server'
+galera::mariadb::1011::mysql_service_name: 'mariadb'
 
 galera::mariadb::114::arbitrator_config_file: '/etc/default/garb'
 galera::mariadb::114::arbitrator_package_name: 'galera-arbitrator-4'
@@ -91,6 +94,7 @@ galera::mariadb::114::arbitrator_service_name: 'garb'
 galera::mariadb::114::client_package_name: 'mariadb-client-11.4'
 galera::mariadb::114::galera_package_name: 'galera-4'
 galera::mariadb::114::mysql_package_name: 'mariadb-server-11.4'
+galera::mariadb::114::mysql_service_name: 'mariadb'
 
 #
 # MariaDB - default settings
