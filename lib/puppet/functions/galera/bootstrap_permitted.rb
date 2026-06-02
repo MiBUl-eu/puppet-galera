@@ -128,7 +128,7 @@ Puppet::Functions.create_function(:'galera::bootstrap_permitted') do
       }
     PQL
 
-    results = Galera::Puppetdb.query(self, query)
+    results = run_puppetdb_query(query, 'cluster certname')
     results.filter_map do |row|
       next unless row.is_a?(Hash)
 
@@ -154,7 +154,7 @@ Puppet::Functions.create_function(:'galera::bootstrap_permitted') do
       }
     PQL
 
-    results = Galera::Puppetdb.query(self, query)
+    results = run_puppetdb_query(query, 'wsrep fact')
     facts = {}
 
     results.each do |row|
@@ -178,5 +178,18 @@ Puppet::Functions.create_function(:'galera::bootstrap_permitted') do
   rescue StandardError => e
     raise Puppet::ParseError,
           "galera::bootstrap_permitted: PuppetDB wsrep fact query failed: #{e.message}"
+  end
+
+  def run_puppetdb_query(query, context)
+    if defined?(Galera::Puppetdb) && Galera::Puppetdb.respond_to?(:query)
+      Galera::Puppetdb.query(self, query)
+    else
+      call_function('puppetdb_query', query)
+    end
+  rescue Puppet::ParseError
+    raise
+  rescue StandardError => e
+    raise Puppet::ParseError,
+          "galera::bootstrap_permitted: PuppetDB #{context} query failed: #{e.message}"
   end
 end

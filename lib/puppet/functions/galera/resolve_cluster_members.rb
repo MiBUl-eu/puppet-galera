@@ -69,8 +69,21 @@ Puppet::Functions.create_function(:'galera::resolve_cluster_members') do
 
   def query_puppetdb(cluster_name, puppetdb_query_string, puppetdb_ip_fact)
     query = puppetdb_query_string || default_puppetdb_query(cluster_name, puppetdb_ip_fact)
-    results = Galera::Puppetdb.query(self, query)
+    results = run_puppetdb_query(query)
     extract_ips(results, puppetdb_ip_fact)
+  rescue Puppet::ParseError
+    raise
+  rescue StandardError => e
+    raise Puppet::ParseError,
+          "galera::resolve_cluster_members: PuppetDB query failed: #{e.message}"
+  end
+
+  def run_puppetdb_query(query)
+    if defined?(Galera::Puppetdb) && Galera::Puppetdb.respond_to?(:query)
+      Galera::Puppetdb.query(self, query)
+    else
+      call_function('puppetdb_query', query)
+    end
   rescue Puppet::ParseError
     raise
   rescue StandardError => e
